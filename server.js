@@ -3,7 +3,7 @@ const app = express();
 
 app.use(express.json());
 
-// ==================== CONFIGURAÇÕES (MESMAS DO HTML) ====================
+// ==================== CONFIGURAÇÕES ====================
 const SUPABASE_URL = 'https://vxrilimkplnraqkvvbov.supabase.co';
 const ANON_KEY    = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ4cmlsaW1rcGxucmFxa3Z2Ym92Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0NzU5NDEsImV4cCI6MjA4OTA1MTk0MX0.ZrRkSosCAclqxOHVFpJSisXroipEArHX1bW5qRzfSAU';
 
@@ -13,13 +13,11 @@ const SENHA = 'max123ZICO';
 const paymentConfigs = {
   mpesa: {
     method: "mpesa",
-    amount: 1,
     customer_name: "Developermax2maker",
     customer_email: "developermax2maker@gmail.com"
   },
   emola: {
     method: "emola",
-    amount: 296.97,
     customer_name: "de",
     customer_email: "developermax2maker@gmail.com"
   }
@@ -49,35 +47,39 @@ function sleep(ms) {
 // ==================== ENDPOINT PRINCIPAL ====================
 app.post('/pagar', async (req, res) => {
   try {
-    let { method, numero, silent = true } = req.body;
+    let { method, numero, amount, silent = true } = req.body;
 
-    // Validações básicas
+    // Validações
     if (!method || !['mpesa', 'emola'].includes(method)) {
       return res.status(400).json({ success: false, error: 'Método inválido. Use "mpesa" ou "emola"' });
     }
     if (!numero || typeof numero !== 'string' || numero.length < 9) {
       return res.status(400).json({ success: false, error: 'Número inválido' });
     }
+    if (!amount || typeof amount !== 'number' || amount <= 0) {
+      return res.status(400).json({ success: false, error: 'Amount deve ser um número maior que 0' });
+    }
 
-    // Validação do prefixo conforme sua regra
+    // Validação de prefixo
     const prefix = numero.substring(0, 2);
     if (method === 'mpesa' && !['84', '85'].includes(prefix)) {
-      return res.status(400).json({ success: false, error: 'Para M-Pesa o número deve começar com 84 ou 85' });
+      return res.status(400).json({ success: false, error: 'M-Pesa deve começar com 84 ou 85' });
     }
     if (method === 'emola' && !['86', '87'].includes(prefix)) {
-      return res.status(400).json({ success: false, error: 'Para Emola o número deve começar com 86 ou 87' });
+      return res.status(400).json({ success: false, error: 'Emola deve começar com 86 ou 87' });
     }
 
-    console.log(`[PAY] Iniciando pagamento ${method.toUpperCase()} → ${numero}`);
+    console.log(`[PAY] ${method.toUpperCase()} | Amount: ${amount} | Número: ${numero}`);
 
     const token = await login();
 
-    // Monta payload
+    // Monta payload com amount dinâmico
     const config = paymentConfigs[method];
     const payload = {
       ...config,
+      amount: amount,                    // ← AGORA VEM DA REQUISIÇÃO
       msisdn: numero,
-      customer_phone: numero,
+      customer_phone: "8444444444",
       reference_description: "Verificação Tigrinho",
       payment_link_id: "d81740c3-0708-4e9a-a7f4-96d4a55f405e",
       order_bump_accepted: false,
@@ -106,31 +108,25 @@ app.post('/pagar', async (req, res) => {
     if (!payRes.ok) throw new Error(payData.message || 'Erro ao enviar pagamento');
 
     const reference = payData.debito_reference || payData.reference;
-    console.log(`[PAY] Pagamento enviado! Reference: ${reference}`);
+    console.log(`[PAY] Enviado! Reference: ${reference} | Amount: ${amount}`);
 
-    // 2. Polling de status (mesma regra do HTML)
+    // 2. Polling de status (mesma lógica de antes)
     let attempts = 0;
-    const MAX_ATTEMPTS = 40; // ~2 minutos
+    const MAX_ATTEMPTS = 40;
 
     while (attempts < MAX_ATTEMPTS) {
       attempts++;
-      await sleep(3000); // 3 segundos
+      await sleep(3000);
 
       const statusRes = await fetch(
         `${SUPABASE_URL}/functions/v1/debito-status?reference=${reference}&tracking_params=%7B%22src%22%3Anull%2C%22sck%22%3Anull%2C%22utm_source%22%3Anull%2C%22utm_campaign%22%3Anull%2C%22utm_medium%22%3Anull%2C%22utm_content%22%3Anull%2C%22utm_term%22%3Anull%7D`,
-        {
-          headers: {
-            'apikey': ANON_KEY,
-            'Authorization': `Bearer ${await login()}`
-          }
-        }
+        { headers: { 'apikey': ANON_KEY, 'Authorization': `Bearer ${await login()}` } }
       );
 
       const statusData = await statusRes.json();
 
-      console.log(`[STATUS] Tentativa ${attempts} → debito_status: ${statusData.debito_status} | provider: ${statusData.provider_response_code}`);
+      console.log(`[STATUS] Tentativa ${attempts} → ${statusData.debito_status} | ${statusData.provider_response_code}`);
 
-      // REGRA EXATA QUE VOCÊ PEDIU
       if (statusData.debito_status !== "PROCESSING" && statusData.provider_response_code !== "PENDING") {
         const isSuccess = 
           statusData.success === true ||
@@ -145,17 +141,13 @@ app.post('/pagar', async (req, res) => {
           provider_reference: statusData.provider_reference,
           message: statusData.message || (isSuccess ? "Pagamento aprovado" : "Pagamento não aprovado"),
           isApproved: isSuccess,
+          amount: amount,
           data: statusData
         });
       }
     }
 
-    // Timeout
-    return res.json({
-      success: false,
-      error: "Timeout: pagamento ainda em processamento após 2 minutos",
-      reference
-    });
+    return res.json({ success: false, error: "Timeout após 2 minutos", reference });
 
   } catch (err) {
     console.error(err);
@@ -164,11 +156,7 @@ app.post('/pagar', async (req, res) => {
 });
 
 // Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Servidor de pagamentos rodando no Render' });
-});
+app.get('/', (req, res) => res.json({ status: 'ok', message: 'Servidor de pagamentos v2 - Amount dinâmico' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Servidor rodando na porta ${PORT}`));
